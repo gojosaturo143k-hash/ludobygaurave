@@ -12,7 +12,7 @@ ws.onmessage = (e) => {
 
     if (data.type === "JOIN_SUCCESS") {
         myColor = data.color;
-        console.log("My color:", myColor);
+        console.log("You are:", myColor);
     }
 
     if (data.type === "GAME_READY") {
@@ -23,18 +23,17 @@ ws.onmessage = (e) => {
 
     if (data.type === "DICE_RESULT") {
         diceOutcome = data.dice;
-        currentTurn = data.player;
-
         showDiceFromServer(diceOutcome);
-
-        canRoll = (currentTurn === myColor);
-        updateTurnUI();
     }
 
     if (data.type === "NEXT_TURN") {
         currentTurn = data.turn;
         canRoll = (currentTurn === myColor);
         updateTurnUI();
+    }
+
+    if (data.type === "ROOM_FULL") {
+        alert("Room full ❌");
     }
 };
 
@@ -782,5 +781,6 @@ function update(){
    // game loop to recursevly call another player '
    
 }
+
 
 
