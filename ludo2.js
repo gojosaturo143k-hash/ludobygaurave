@@ -37,8 +37,25 @@ ws.onmessage = (e) => {
     }
 };
 
-const dices = document.getElementsByClassName('dice');
-const p1Dice = document.getElementById('p1-dice');
+// 🎲 Dice element
+const diceBtn = document.querySelector(".dice");
+
+// 🎲 Dice roll function (SERVER CONTROLLED)
+function rollDice() {
+    if (!canRoll) {
+        console.log("Not your turn");
+        return;
+    }
+
+    ws.send(JSON.stringify({
+        type: "ROLL_DICE"
+    }));
+
+    canRoll = false;
+}
+
+// 🎲 Click bind
+diceBtn.addEventListener("click", rollDice);
 const redsMoveToken = document.getElementById('redPlayerToken');
 const bluesMoveToken = document.getElementById('bluePlayerToken');
 const greensMoveToken = document.getElementById('greenPlayerToken');
@@ -781,6 +798,7 @@ function update(){
    // game loop to recursevly call another player '
    
 }
+
 
 
 
