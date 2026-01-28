@@ -31,24 +31,18 @@ let selectedColor = null;
 
 
 // PLAY BUTTON
-play.addEventListener("click", (e) => {
-    e.preventDefault();
+play.addEventListener("click", () => {
+    const name = document.querySelector("#name").value;
+    const room = document.querySelector("#room").value;
 
-    const name = document.getElementById("playerName").value.trim();
-    const room = document.getElementById("roomCode").value.trim();
+    ws.send(JSON.stringify({
+        type: "JOIN_ROOM",
+        name,
+        room
+    }));
 
-    if (!name || !room) {
-        alert("Name aur Room code daalo");
-        return;
-    }
-
-    if (!selectedColor) {
-        alert("Ek color select karo");
-        return;
-    }
-
-    click.play();
-    statusEl.innerText = "Joining room...";
+    status.innerText = "Joining room...";
+});
 
     // 🔥 SERVER KO JOIN REQUEST
     ws.send(JSON.stringify({
@@ -88,4 +82,5 @@ ws.onmessage = (e) => {
         alert("Room full hai ❌");
         statusEl.innerText = "Room full ❌";
     }
+
 };
