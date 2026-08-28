@@ -1,11 +1,12 @@
 // js/game-network-adapter.js
 // Connects ludo2.js gameplay to Firebase (host-authoritative)
+// Phase 4: action dedupe, host failover, host initialization, turn validation
 
 (function(){
-  // Wait until ludo2.js has been loaded and its globals are present
   function whenReady(cb) {
     const wait = () => {
-      if (typeof window.rollDice !== 'undefined' && typeof window.moveToken !== 'undefined' && window.FirebaseRoom && window.FirebaseGame && window.FirebaseAuth) {
+      // ludo2.js defines many globals; ensure basic ones are present
+      if (window.FirebaseRoom && window.FirebaseGame && window.FirebaseAuth && document.readyState === 'complete') {
         cb();
       } else {
         setTimeout(wait, 200);
@@ -19,203 +20,259 @@
     const playerUid = localStorage.getItem('playerUid') || window.FirebaseAuth.getUid();
     const playerColor = localStorage.getItem('playerColor') || null;
     const onlineMode = !!(roomCode && playerUid && playerColor);
+    console.log('[FIREBASE-HOST] adapter init; onlineMode=', onlineMode, 'room=', roomCode);
 
-    console.log('[game-network-adapter] onlineMode=', onlineMode, 'room=', roomCode);
-
-    // references to original functions
-    const orig_rollDice = window.rollDice;
+    // references to original functions (may be undefined in local-only flow)
+    const orig_showDiceFromServer = window.showDiceFromServer;
     const orig_moveToken = window.moveToken;
     const orig_openToken = window.openToken;
     const orig_update = window.update;
-    const orig_showDiceFromServer = window.showDiceFromServer;
 
     let isHost = false;
-    let processingActionKey = null;
+    let hostUnsubActions = null;
+    let hostUnsubHostId = null;
+    let clientUnsubGameState = null;
 
-    async function determineHost() {
+    // Utility: safe read of gameState
+    async function loadGameState() {
+      const state = await window.FirebaseGame.getGameStateOnce(roomCode);
+      console.log('[FIREBASE-STATE] loadGameState', roomCode, !!state);
+      return state;
+    }
+
+    async function loadPlayers() {
+      const players = await window.FirebaseGame.getPlayersOnce(roomCode);
+      return players;
+    }
+
+    // Validate action against current gameState and room
+    async function validateAction(action, gameState, players) {
+      // action: { _actionKey, type, uid, color, pieceId, timestamp }
+      if (!action || !action.type) return { valid: false, reason: 'INVALID_ACTION' };
+      if (!gameState) return { valid: false, reason: 'NO_GAME' };
+      // check player exists
+      const p = players && players[action.uid];
+      if (!p) return { valid: false, reason: 'PLAYER_NOT_IN_ROOM' };
+      if (!p.online) return { valid: false, reason: 'PLAYER_OFFLINE' };
+      if (p.color !== action.color) return { valid: false, reason: 'COLOR_MISMATCH' };
+      // validate turn-based actions
+      if (action.type === 'ROLL_DICE' || action.type === 'MOVE_TOKEN') {
+        if (gameState.currentTurnUid !== action.uid) return { valid: false, reason: 'NOT_YOUR_TURN' };
+      }
+      return { valid: true };
+    }
+
+    // Process an action as host (idempotent)
+    async function processAction(action) {
+      if (!action || !action._actionKey) return;
+      const actionId = action._actionKey;
+      console.log('[FIREBASE-HOST] processing action', actionId, action.type, action.uid);
+
       try {
-        isHost = await window.FirebaseRoom.isHost(roomCode);
-        console.log('[game-adapter] isHost=', isHost);
-      } catch (err) {
-        console.warn('determineHost error', err);
-        isHost = false;
-      }
-    }
+        // dedupe: mark processed atomically
+        const markRes = await window.FirebaseGame.markActionProcessed(roomCode, actionId);
+        if (!markRes.success) {
+          console.log('[FIREBASE-ACTION] action already processed or mark failed', actionId, markRes.error);
+          return;
+        }
 
-    function serializePiecesFromDOM(){
-      // Build pieces mapping according to DOM positions
-      const colors=['red','green','yellow','blue'];
-      const pieces={};
-      colors.forEach(color=>{
-        pieces[color]=[];
-        for(let i=1;i<=4;i++){
-          const id = `${color}Token${i}`;
-          const el = document.getElementById(id);
-          if (!el || !el.parentElement) { pieces[color].push(0); continue; }
-          // find class name like redPathNN
-          const classes = Array.from(el.parentElement.classList || []);
-          let pos = 0;
-          for(const c of classes){
-            const prefix = color + 'Path';
-            if (c.startsWith(prefix)){
-              const num = parseInt(c.substring(prefix.length));
-              if (!isNaN(num)) { pos = num; break; }
-            }
+        // load latest gameState and players for validation
+        const [gameState, players] = await Promise.all([window.FirebaseGame.getGameStateOnce(roomCode), window.FirebaseGame.getPlayersOnce(roomCode)]);
+        if (!gameState) {
+          console.warn('[FIREBASE-HOST] no gameState present when processing action', action.type);
+          // Depending on policy we may initialize only when safe; for now reject
+          await window.FirebaseGame.writeEvent(roomCode, { type: 'ACTION_REJECTED', reason: 'NO_GAME', actionId });
+          return;
+        }
+
+        // Prevent processing old/stale actions: if action.timestamp <= gameState.updatedAt then skip
+        // Note: timestamps are server timestamps; to be safe, compare presence only if updatedAt exists
+        if (gameState.updatedAt && action.timestamp && typeof action.timestamp === 'number') {
+          if (action.timestamp <= gameState.updatedAt) {
+            console.log('[FIREBASE-ACTION] stale action, ignoring', actionId);
+            return;
           }
-          // special: tokenHome or redHome detection
-          if (el.parentElement.classList.contains('tokenHome') || el.parentElement.classList.contains(color+'Home')) pos = 57;
-          pieces[color].push(pos);
         }
-      });
-      return pieces;
-    }
 
-    async function writeCanonicalState(partialState) {
-      const state = Object.assign({}, partialState);
-      // include pieces
-      state.pieces = serializePiecesFromDOM();
-      state.updatedAt = firebase.database.ServerValue.TIMESTAMP;
-      await window.FirebaseGame.writeGameState(roomCode, state);
-    }
-
-    // override rollDice and moveToken to handle online mode
-    window.rollDice = function(){
-      if (!onlineMode) return orig_rollDice.apply(this, arguments);
-      // if online
-      if (isHost) {
-        // host generates dice and calls host-side showDiceFromServer
-        const dice = Math.floor(Math.random()*6)+1;
-        console.log('[HOST] generated dice', dice);
-        // call original UI function to show dice
-        try { orig_showDiceFromServer.call(null, dice); } catch(e){ console.error(e); }
-        // write event and provisional gameState diceValue
-        window.FirebaseGame.writeEvent(roomCode, { type: 'DICE_RESULT', uid: window.FirebaseAuth.getUid(), color: playerColor, diceValue: dice });
-        // Do not advance turn here; host will wait for MOVE_TOKEN action to apply move and then update gameState
-        window.FirebaseGame.writeGameState(roomCode, { diceValue: dice, diceRolling: false });
-      } else {
-        // non-host: send action intent to Firebase
-        window.FirebaseGame.sendAction(roomCode, { type: 'ROLL_DICE', color: playerColor });
-      }
-    };
-
-    // override openToken/moveToken for non-host clients to only send action instead of moving locally
-    window.openToken = function(){
-      if (!onlineMode) return orig_openToken.apply(this, arguments);
-      if (isHost) return orig_openToken.apply(this, arguments);
-      // non-host: send MOVE_TOKEN with piece id
-      const tokenId = this.id || (this.getAttribute && this.getAttribute('id')); // this refers to clicked element
-      window.FirebaseGame.sendAction(roomCode, { type: 'MOVE_TOKEN', color: playerColor, pieceId: tokenId });
-    };
-
-    window.moveToken = function(){
-      if (!onlineMode) return orig_moveToken.apply(this, arguments);
-      if (isHost) {
-        // host executes original movement (this must be the token element)
-        const res = orig_moveToken.apply(this, arguments);
-        return res;
-      }
-      // non-host: send action
-      const tokenId = this.id || (this.getAttribute && this.getAttribute('id'));
-      window.FirebaseGame.sendAction(roomCode, { type: 'MOVE_TOKEN', color: playerColor, pieceId: tokenId });
-    };
-
-    // wrap update() to detect end of host moves and then write canonical state
-    window.update = function(){
-      // call original
-      const res = orig_update.apply(this, arguments);
-      // if host and onlineMode and we recently processed an action, serialize and write gameState
-      if (onlineMode && isHost) {
-        try {
-          // simple heuristic: after update, write pieces and clear diceValue if necessary
-          const pieces = serializePiecesFromDOM();
-          // build minimal state
-          const minimalState = {
-            started: true,
-            pieces: pieces
-          };
-          // write gameState
-          window.FirebaseGame.writeGameState(roomCode, minimalState);
-        } catch (err) {
-          console.error('error writing state after update', err);
+        // validate
+        const validation = await validateAction(action, gameState, players);
+        if (!validation.valid) {
+          console.warn('[FIREBASE-ACTION] invalid action', actionId, validation.reason);
+          await window.FirebaseGame.writeEvent(roomCode, { type: 'ACTION_REJECTED', reason: validation.reason, actionId });
+          return;
         }
-      }
-      return res;
-    };
 
-    // host action processor
-    async function processActionAsHost(action) {
-      if (!action || !action.type) return;
-      console.log('[host] processing action', action);
-      const uid = action.uid;
-      const color = action.color;
-      if (action.type === 'ROLL_DICE') {
-        // only accept if correct player - naive check by comparing color against currentTurn player in DOM is not present yet
-        // We'll allow for now and generate dice
-        const dice = Math.floor(Math.random()*6)+1;
-        orig_showDiceFromServer.call(null, dice);
-        await window.FirebaseGame.writeEvent(roomCode, { type: 'DICE_RESULT', uid, color, diceValue: dice });
-        await window.FirebaseGame.writeGameState(roomCode, { diceValue: dice, diceRolling: false });
-      } else if (action.type === 'MOVE_TOKEN') {
-        // find token element by id (= pieceId)
-        const tokenEl = document.getElementById(action.pieceId);
-        if (tokenEl) {
-          // call orig_moveToken in host context (click simulation)
+        // At this point, action is accepted. Execute authoritative logic using existing ludo2.js functions.
+        if (action.type === 'ROLL_DICE') {
+          // host generates dice (do not trust client)
+          const dice = Math.floor(Math.random() * 6) + 1;
+          console.log('[FIREBASE-HOST] GENERATED DICE', dice);
+          // Show dice on host UI
+          try { orig_showDiceFromServer && orig_showDiceFromServer(dice); } catch (e) { console.error('[FIREBASE-HOST] showDice error', e); }
+          // write event and update gameState diceValue
+          await window.FirebaseGame.writeEvent(roomCode, { type: 'DICE_RESULT', uid: action.uid, color: action.color, diceValue: dice });
+          await window.FirebaseGame.writeGameState(roomCode, Object.assign({}, gameState, { diceValue: dice, diceRolling: false }));
+        } else if (action.type === 'MOVE_TOKEN') {
+          // Host must ensure the token element exists and call the original moveToken handler on the host DOM
+          const tokenId = action.pieceId || action.tokenId;
+          const tokenEl = tokenId ? document.getElementById(tokenId) : null;
+          if (!tokenEl) {
+            console.warn('[FIREBASE-HOST] token element not found for move', tokenId);
+            await window.FirebaseGame.writeEvent(roomCode, { type: 'ACTION_REJECTED', reason: 'TOKEN_NOT_FOUND', actionId });
+            return;
+          }
           try {
-            orig_moveToken.apply(tokenEl, []);
-            // after movement, update canonical state
-            const pieces = serializePiecesFromDOM();
-            await window.FirebaseGame.writeEvent(roomCode, { type: 'MOVE_APPLIED', uid, color, pieceId: action.pieceId });
-            await window.FirebaseGame.writeGameState(roomCode, { pieces: pieces });
+            // Call the original moveToken function in the context of the token element
+            orig_moveToken && orig_moveToken.apply(tokenEl, []);
+            // After host applies move, serialize pieces and update gameState
+            const pieces = (function(){
+              // quick serialization similar to previous adapter
+              const colors=['red','green','yellow','blue'];
+              const map={};
+              colors.forEach(color=>{ map[color]=[]; for(let i=1;i<=4;i++){ const id=`${color}Token${i}`; const el=document.getElementById(id); if (!el||!el.parentElement) { map[color].push(0); continue; } const classes=Array.from(el.parentElement.classList||[]); let pos=0; for(const c of classes){ const prefix=color+'Path'; if(c.startsWith(prefix)){ const n=parseInt(c.substring(prefix.length)); if(!isNaN(n)){ pos=n; break; } } } if (el.parentElement.classList.contains('tokenHome')||el.parentElement.classList.contains(color+'Home')) pos=57; map[color].push(pos);} }); return map; })();
+            await window.FirebaseGame.writeEvent(roomCode, { type: 'MOVE_APPLIED', uid: action.uid, color: action.color, pieceId: tokenId });
+            await window.FirebaseGame.writeGameState(roomCode, Object.assign({}, gameState, { pieces: pieces }));
           } catch (err) {
-            console.error('host moveToken error', err);
+            console.error('[FIREBASE-HOST] error during moveToken', err);
+            await window.FirebaseGame.writeEvent(roomCode, { type: 'ACTION_ERROR', reason: err.message, actionId });
           }
+        } else {
+          console.warn('[FIREBASE-HOST] unknown action type', action.type);
         }
+
+      } catch (err) {
+        console.error('[FIREBASE-HOST] processAction error', err);
       }
     }
 
-    // listen for actions as host
-    async function startHostLoop() {
-      await determineHost();
-      if (!isHost) return;
-      console.log('[game-adapter] starting host action listener');
-      window.FirebaseGame.listenActionsAsHost(roomCode, async (action) => {
-        // simple dedupe: process every action
-        await processActionAsHost(action);
+    // Host initialization when this client becomes host
+    async function initAsHost() {
+      console.log('[FIREBASE-FAILOVER] initAsHost start for', roomCode);
+      // load latest gameState
+      const state = await loadGameState();
+      if (state) {
+        // Reconstruct DOM to match canonical state
+        console.log('[FIREBASE-FAILOVER] reconstructing board from gameState');
+        try { window.FirebaseRenderer.reconstructFromState(state); } catch (e) { console.error('[FIREBASE-RENDER] reconstruct failed', e); }
+      } else {
+        // No gameState exists: only initialize if enough players
+        const players = await loadPlayers();
+        const playerCount = Object.keys(players || {}).length;
+        if (playerCount >= 2) {
+          // Initialize minimal gameState only if still null using transaction on gameState
+          const rc = roomCode;
+          const ref = firebase.database().ref(`rooms/${rc}/gameState`);
+          try {
+            await ref.transaction(curr => {
+              if (curr === null) {
+                // create safe initial state; do not overwrite existing
+                return { started: true, turnNumber: 1, currentTurnUid: Object.keys(players)[0], currentTurnColor: (players[Object.keys(players)[0]]||{}).color || null, diceValue: null, pieces: { red:[0,0,0,0], green:[0,0,0,0], blue:[0,0,0,0], yellow:[0,0,0,0] }, lastActionId: null, updatedAt: firebase.database.ServerValue.TIMESTAMP };
+              }
+              return; // abort if exists
+            }, undefined, false);
+            console.log('[FIREBASE-FAILOVER] initialized gameState because it was missing');
+          } catch (err) {
+            console.error('[FIREBASE-FAILOVER] error initializing gameState', err);
+          }
+        } else {
+          console.log('[FIREBASE-FAILOVER] not enough players to init gameState');
+        }
+      }
+
+      // Start listening for actions as host
+      if (hostUnsubActions) hostUnsubActions();
+      hostUnsubActions = window.FirebaseGame.listenActionsAsHost(roomCode, async (action) => {
+        try {
+          // Only process actions intended for this room and that are not already marked
+          if (!action || !action._actionKey) return;
+          // process in sequence
+          await processAction(action);
+        } catch (err) { console.error('[FIREBASE-HOST] action handler error', err); }
+      });
+
+      console.log('[FIREBASE-HOST] host action listener started');
+    }
+
+    // Listen for host changes and start host mode if this client becomes host
+    function watchHostChange() {
+      const rc = roomCode;
+      const ref = firebase.database().ref(`rooms/${rc}/hostId`);
+      hostUnsubHostId = ref.on('value', async snap => {
+        const newHost = snap.val();
+        const uid = window.FirebaseAuth.getUid();
+        console.log('[FIREBASE-FAILOVER] hostId changed to', newHost, 'my uid=', uid);
+        if (newHost === uid) {
+          isHost = true;
+          await initAsHost();
+        } else {
+          if (isHost) {
+            console.log('[FIREBASE-FAILOVER] I am no longer host, cleaning host listeners');
+            if (hostUnsubActions) { hostUnsubActions(); hostUnsubActions = null; }
+          }
+          isHost = false;
+        }
       });
     }
 
-    // client listener for gameState/ events
+    // client-side gameState listener: render canonical state
     function startClientListeners() {
-      console.log('[game-adapter] startClientListeners for', roomCode);
-      window.FirebaseGame.listenGameState(roomCode, (state) => {
-        if (!state) return;
-        // update UI: dice, pieces, current turn, winner etc
+      if (clientUnsubGameState) clientUnsubGameState();
+      clientUnsubGameState = window.FirebaseGame.listenGameState(roomCode, (state) => {
         try {
+          if (!state) return;
+          console.log('[FIREBASE-STATE] client received gameState update');
           if (state.diceValue) {
-            // show dice animation via existing function
-            orig_showDiceFromServer.call(null, state.diceValue);
+            orig_showDiceFromServer && orig_showDiceFromServer(state.diceValue);
           }
           if (state.pieces) {
-            window.FirebaseRenderer.renderPieces(state.pieces);
+            window.FirebaseRenderer.reconstructFromState(state);
           }
         } catch (err) {
-          console.error('error applying gameState', err);
+          console.error('[FIREBASE-RENDER] apply gameState error', err);
         }
       });
     }
 
+    // Initialize adapter
     async function init() {
-      if (!onlineMode) return;
-      await determineHost();
-      if (isHost) {
-        // start listening for actions and process them
-        startHostLoop();
+      if (!onlineMode) {
+        console.log('[FIREBASE-HOST] offline/local mode; adapter inert');
+        return;
       }
-      // start client gameState listeners for everyone
+
+      // start watching host changes
+      watchHostChange();
+
+      // determine if we are host now
+      isHost = await window.FirebaseGame.isHost(roomCode);
+      if (isHost) {
+        await initAsHost();
+      }
+
+      // start client listener always
       startClientListeners();
+
+      // ensure presence re-registration (on reload) - ensure players/{uid}/online = true and set onDisconnect
+      try {
+        const uid = window.FirebaseAuth.getUid();
+        if (uid) {
+          const playerOnlineRef = firebase.database().ref(`rooms/${roomCode}/players/${uid}/online`);
+          await playerOnlineRef.set(true);
+          playerOnlineRef.onDisconnect().set(false);
+        }
+      } catch (err) { console.error('[FIREBASE-GAME] presence error', err); }
+
+      console.log('[FIREBASE-HOST] adapter init complete');
     }
 
     init();
+
+    // cleanup before unload
+    window.addEventListener('beforeunload', () => {
+      if (hostUnsubActions) hostUnsubActions();
+      if (hostUnsubHostId) firebase.database().ref(`rooms/${roomCode}/hostId`).off('value', hostUnsubHostId);
+      if (clientUnsubGameState) clientUnsubGameState();
+    });
 
   });
 

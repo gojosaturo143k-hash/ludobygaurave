@@ -1,10 +1,10 @@
 // js/firebase-game.js
 // Low-level Firebase game networking primitives (no game rules)
-// Depends on firebase compat SDK and window.FirebaseAuth
+// Updated for Phase 4: processedActions helpers and safer primitives
 
 (function(){
   if (!window.firebase) {
-    console.error('firebase-game: Firebase SDK not loaded');
+    console.error('[FIREBASE-GAME] Firebase SDK not loaded');
     window.FirebaseGame = {
       getCurrentUid: () => null,
       isHost: async () => false,
@@ -13,6 +13,10 @@
       listenGameState: () => () => {},
       writeGameState: async () => ({ success: false }),
       writeEvent: async () => ({ success: false }),
+      markActionProcessed: async () => ({ success: false }),
+      checkActionProcessed: async () => false,
+      getGameStateOnce: async () => null,
+      getPlayersOnce: async () => ({}),
       cleanup: () => {}
     };
     return;
@@ -34,7 +38,7 @@
       const uid = getCurrentUid();
       return uid && hostId === uid;
     } catch (err) {
-      console.error('isHost error', err);
+      console.error('[FIREBASE-GAME] isHost error', err);
       return false;
     }
   }
@@ -48,10 +52,52 @@
       if (!uid) return { success: false, error: 'AUTH_REQUIRED' };
       const payload = Object.assign({}, action, { uid, timestamp: firebase.database.ServerValue.TIMESTAMP });
       const ref = await db.ref(`rooms/${rc}/actions`).push(payload);
+      console.log('[FIREBASE-GAME] sendAction', rc, ref.key, payload.type);
       return { success: true, actionId: ref.key };
     } catch (err) {
-      console.error('sendAction error', err);
+      console.error('[FIREBASE-GAME] sendAction error', err);
       return { success: false, error: err.message };
+    }
+  }
+
+  // markActionProcessed: atomically set processedActions/{actionId} if not exists
+  async function markActionProcessed(roomCode, actionId) {
+    if (!actionId) return { success: false, error: 'INVALID_ACTION_ID' };
+    try {
+      const rc = String(roomCode || '').toUpperCase();
+      const ref = db.ref(`rooms/${rc}/processedActions/${actionId}`);
+      const uid = getCurrentUid() || 'unknown';
+      // Use transaction to ensure only first writer succeeds
+      const result = await ref.transaction(curr => {
+        if (curr === null) {
+          return { processedBy: uid, processedAt: firebase.database.ServerValue.TIMESTAMP };
+        }
+        return; // abort, already exists
+      }, undefined, false);
+
+      if (result.committed) {
+        console.log('[FIREBASE-GAME] markActionProcessed committed', actionId);
+        return { success: true };
+      } else {
+        // already processed
+        return { success: false, error: 'ALREADY_PROCESSED' };
+      }
+    } catch (err) {
+      console.error('[FIREBASE-GAME] markActionProcessed error', err);
+      return { success: false, error: err.message };
+    }
+  }
+
+  // checkActionProcessed: quickly check whether processedActions/{actionId} exists
+  async function checkActionProcessed(roomCode, actionId) {
+    if (!actionId) return false;
+    try {
+      const rc = String(roomCode || '').toUpperCase();
+      const snap = await db.ref(`rooms/${rc}/processedActions/${actionId}`).once('value');
+      return !!snap.val();
+    } catch (err) {
+      console.error('[FIREBASE-GAME] checkActionProcessed error', err);
+      return false;
     }
   }
 
@@ -64,6 +110,7 @@
       const key = snap.key;
       handler(Object.assign({ _actionKey: key }, val));
     });
+    console.log('[FIREBASE-GAME] listenActionsAsHost', rc);
     return () => ref.off('child_added', cb);
   }
 
@@ -74,7 +121,32 @@
     const cb = ref.on('value', snap => {
       handler(snap.val());
     });
+    console.log('[FIREBASE-GAME] listenGameState', rc);
     return () => ref.off('value', cb);
+  }
+
+  // getGameStateOnce
+  async function getGameStateOnce(roomCode) {
+    try {
+      const rc = String(roomCode || '').toUpperCase();
+      const snap = await db.ref(`rooms/${rc}/gameState`).once('value');
+      return snap.val();
+    } catch (err) {
+      console.error('[FIREBASE-GAME] getGameStateOnce error', err);
+      return null;
+    }
+  }
+
+  // getPlayersOnce
+  async function getPlayersOnce(roomCode) {
+    try {
+      const rc = String(roomCode || '').toUpperCase();
+      const snap = await db.ref(`rooms/${rc}/players`).once('value');
+      return snap.val() || {};
+    } catch (err) {
+      console.error('[FIREBASE-GAME] getPlayersOnce error', err);
+      return {};
+    }
   }
 
   // writeGameState: host writes canonical gameState (overwrite)
@@ -83,9 +155,10 @@
       const rc = String(roomCode || '').toUpperCase();
       const payload = Object.assign({}, state, { updatedAt: firebase.database.ServerValue.TIMESTAMP });
       await db.ref(`rooms/${rc}/gameState`).set(payload);
+      console.log('[FIREBASE-GAME] writeGameState', rc);
       return { success: true };
     } catch (err) {
-      console.error('writeGameState error', err);
+      console.error('[FIREBASE-GAME] writeGameState error', err);
       return { success: false, error: err.message };
     }
   }
@@ -96,15 +169,17 @@
       const rc = String(roomCode || '').toUpperCase();
       const payload = Object.assign({}, ev, { timestamp: firebase.database.ServerValue.TIMESTAMP });
       const ref = await db.ref(`rooms/${rc}/events`).push(payload);
+      console.log('[FIREBASE-GAME] writeEvent', rc, ev.type);
       return { success: true, eventId: ref.key };
     } catch (err) {
-      console.error('writeEvent error', err);
+      console.error('[FIREBASE-GAME] writeEvent error', err);
       return { success: false, error: err.message };
     }
   }
 
   function cleanup() {
     // placeholder for future cleanup of listeners
+    console.log('[FIREBASE-GAME] cleanup');
   }
 
   window.FirebaseGame = {
@@ -115,6 +190,10 @@
     listenGameState,
     writeGameState,
     writeEvent,
+    markActionProcessed,
+    checkActionProcessed,
+    getGameStateOnce,
+    getPlayersOnce,
     cleanup
   };
 

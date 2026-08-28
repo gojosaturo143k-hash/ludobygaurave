@@ -1,0 +1,34 @@
+{
+  "rules": {
+    ".read": "auth != null",
+    "rooms": {
+      "$room": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "players": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid"
+          }
+        },
+        "actions": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        },
+        "processedActions": {
+          // only host should mark actions processed
+          ".read": "auth != null",
+          ".write": "auth != null && auth.uid === root.child('rooms').child($room).child('hostId').val()"
+        },
+        "gameState": {
+          ".read": "auth != null",
+          // only host can modify canonical gameState
+          ".write": "auth != null && auth.uid === root.child('rooms').child($room).child('hostId').val()"
+        },
+        "hostId": {
+          // allow setting hostId only if it's currently null (room creation) or by current host
+          ".write": "auth != null && (data.exists() ? auth.uid === data.val() : true) || auth.uid === root.child('rooms').child($room).child('hostId').val()"
+        }
+      }
+    }
+  }
+}
