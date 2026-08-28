@@ -95,7 +95,87 @@ let selectedColor = null;
 });
 
 
-// PLAY BUTTON
+// New Phase2: Firebase room create/join handlers
+(function phase2_lobby() {
+  const createBtn = document.getElementById('createRoom');
+  const joinBtn = document.getElementById('joinRoom');
+  const playerNameInput = document.getElementById('playerName');
+  const roomCodeInput = document.getElementById('roomCode');
+
+  function showStatus(msg) {
+    const s = document.getElementById('status');
+    if (s) s.innerText = msg;
+    console.log('[Lobby]', msg);
+  }
+
+  if (createBtn) {
+    createBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const name = (playerNameInput && playerNameInput.value) ? playerNameInput.value.trim() : '';
+      const roomCode = (roomCodeInput && roomCodeInput.value) ? roomCodeInput.value.trim() : '';
+      if (!name) { showStatus('Enter your name'); return; }
+      showStatus('Creating room...');
+      if (!window.FirebaseRoom) { showStatus('FirebaseRoom not loaded'); return; }
+      const rc = roomCode || (Math.random().toString(36).substr(2,6)).toUpperCase();
+      const res = await window.FirebaseRoom.createRoom(rc, name);
+      if (res.success) {
+        // store local info
+        localStorage.setItem('playerName', name);
+        localStorage.setItem('roomCode', res.roomCode);
+        localStorage.setItem('playerUid', res.uid);
+        localStorage.setItem('playerColor', res.color);
+        showStatus(`Room created: ${res.roomCode}. You are host.`);
+
+        // listen for players
+        window.FirebaseRoom.onPlayersChanged(res.roomCode, (players) => {
+          showStatus(`Players: ${players.length}/4`);
+          console.log('players', players);
+        });
+
+        // navigate to ludo.html
+        window.location.href = 'ludo.html';
+      } else {
+        showStatus('Create failed: ' + (res.error || 'Unknown'));
+      }
+    });
+  }
+
+  if (joinBtn) {
+    joinBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const name = (playerNameInput && playerNameInput.value) ? playerNameInput.value.trim() : '';
+      const roomCode = (roomCodeInput && roomCodeInput.value) ? roomCodeInput.value.trim() : '';
+      if (!name) { showStatus('Enter your name'); return; }
+      if (!roomCode) { showStatus('Enter room code to join'); return; }
+      showStatus('Joining room...');
+      if (!window.FirebaseRoom) { showStatus('FirebaseRoom not loaded'); return; }
+      const res = await window.FirebaseRoom.joinRoom(roomCode, name);
+      if (res.success) {
+        // store local info
+        localStorage.setItem('playerName', name);
+        localStorage.setItem('roomCode', res.roomCode);
+        localStorage.setItem('playerUid', res.uid);
+        localStorage.setItem('playerColor', res.color);
+        showStatus(`Joined room: ${res.roomCode}. Color: ${res.color}`);
+
+        window.FirebaseRoom.onPlayersChanged(res.roomCode, (players) => {
+          showStatus(`Players: ${players.length}/4`);
+          console.log('players', players);
+        });
+
+        // navigate to ludo.html
+        window.location.href = 'ludo.html';
+      } else {
+        if (res.error === 'ROOM_NOT_FOUND') showStatus('Room not found');
+        else if (res.error === 'ROOM_FULL') showStatus('Room full');
+        else showStatus('Join failed: ' + (res.error || 'Unknown'));
+      }
+    });
+  }
+})();
+
+
+// PLAY BUTTON (existing) - untouched
 play.addEventListener("click", () => {
     const name = document.querySelector("#name").value;
     const room = document.querySelector("#room").value;
