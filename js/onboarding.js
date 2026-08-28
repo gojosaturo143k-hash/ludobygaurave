@@ -1,77 +1,89 @@
 // js/onboarding.js
-// Phase 6: Player Name Onboarding
+// Phase 6: Player Name Onboarding (fixed initialization + logs)
 
 (function(){
   function $(id){ return document.getElementById(id); }
+
+  function log(msg, ...args){
+    try { console.log('[ONBOARDING]', msg, ...args); } catch(e) {}
+  }
 
   function sanitizeName(raw){
     if (!raw) return '';
     let s = String(raw).trim();
     // remove angle brackets to prevent tag injection
     s = s.replace(/[<>]/g, '');
-    // limit length
+    // clamp length
     if (s.length > 20) s = s.substring(0,20);
     return s;
   }
 
   function showOnboard(){
     const modal = $('onboardingModal');
+    if (!modal) { log('onboard modal not found'); return; }
     modal.style.display = 'flex';
     const input = $('onboardName');
-    input.value = '';
-    input.focus();
+    if (input) input.focus();
+    log('showing name modal');
   }
 
   function hideOnboard(){
     const modal = $('onboardingModal');
+    if (!modal) return;
     modal.style.display = 'none';
   }
 
   function updatePlayerInfoUI(){
     const name = localStorage.getItem('playerName');
     if (name && name.trim().length>0){
-      $('playerInfo').style.display = 'block';
-      $('playerInfoName').textContent = name;
+      const info = $('playerInfo');
+      if (info) info.style.display = 'block';
+      const nameSpan = $('playerInfoName');
+      if (nameSpan) nameSpan.textContent = name;
       const pn = $('playerName'); if (pn) pn.value = name;
       // hidden fallback
       const nameFallback = document.getElementById('name'); if(nameFallback) nameFallback.value = name;
     } else {
-      $('playerInfo').style.display = 'none';
+      const info = $('playerInfo'); if (info) info.style.display = 'none';
     }
   }
 
   async function saveNameFlow(name){
     const clean = sanitizeName(name);
     const errEl = $('onboardError');
-    if (!clean || clean.length < 2){ errEl.textContent = 'Name must be at least 2 characters'; errEl.style.display='block'; return false; }
-    if (clean.length > 20){ errEl.textContent = 'Name must be 20 characters or fewer'; errEl.style.display='block'; return false; }
-    errEl.style.display='none';
+    if (!clean || clean.length < 2){ if(errEl){ errEl.textContent = 'Name must be at least 2 characters'; errEl.style.display='block'; } return false; }
+    if (clean.length > 20){ if(errEl){ errEl.textContent = 'Name must be 20 characters or fewer'; errEl.style.display='block'; } return false; }
+    if (errEl) { errEl.style.display='none'; }
 
     // save locally
     localStorage.setItem('playerName', clean);
-    // update existing inputs/fallbacks
+    log('name saved locally', clean);
+
+    // update visible inputs / fallback
     const pn = $('playerName'); if (pn) pn.value = clean;
     const nameFallback = document.getElementById('name'); if(nameFallback) nameFallback.value = clean;
 
-    // If user is already in a room, update their name in the Firebase room (without creating duplicates)
+    // If user is in a room, attempt to update the player's name safely (upsert behavior)
     const roomCode = localStorage.getItem('roomCode');
     const playerUid = localStorage.getItem('playerUid');
     if (roomCode && window.FirebaseRoom && playerUid) {
       try {
-        // joinRoom acts as an upsert: if playerUid already present it updates name/online
         await window.FirebaseRoom.joinRoom(roomCode, clean);
-        console.log('[ONBOARD] updated name in Firebase room');
-      } catch (e) { console.warn('[ONBOARD] failed to update name in Firebase room', e); }
+        log('updated name in Firebase room (upsert)', roomCode);
+      } catch (e) {
+        console.warn('[ONBOARDING] failed to update name in Firebase room', e);
+      }
     }
 
     updatePlayerInfoUI();
     hideOnboard();
+    log('name saved', clean);
     return true;
   }
 
-  document.addEventListener('DOMContentLoaded', () => {
-    const existing = localStorage.getItem('playerName');
-    // ensure hidden fallback inputs exist (index.js expects them)
+  function initOnboarding(){
+    log('initialized');
+    // ensure fallback hidden inputs exist
     if(!document.getElementById('name')){
       const hid = document.createElement('input'); hid.type='hidden'; hid.id='name'; document.body.appendChild(hid);
     }
@@ -81,24 +93,34 @@
 
     updatePlayerInfoUI();
 
-    if (!existing || existing.trim().length === 0){
-      // block entry until name provided
+    const existing = localStorage.getItem('playerName');
+    if (existing && existing.trim().length>0) {
+      log('player name found', existing);
+      // do not show onboarding
+    } else {
+      log('player name NOT found; showing onboarding');
       showOnboard();
     }
 
     // Save button
-    $('onboardSave').addEventListener('click', async () => {
-      const name = $('onboardName').value;
-      await saveNameFlow(name);
-    });
-
-    // Allow Enter key
-    $('onboardName').addEventListener('keyup', async (e) => {
-      if (e.key === 'Enter') {
-        const name = $('onboardName').value;
+    const saveBtn = $('onboardSave');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        const name = $('onboardName') ? $('onboardName').value : '';
         await saveNameFlow(name);
-      }
-    });
+      });
+    }
+
+    // Enter key support
+    const input = $('onboardName');
+    if (input) {
+      input.addEventListener('keyup', async (e) => {
+        if (e.key === 'Enter') {
+          const name = input.value;
+          await saveNameFlow(name);
+        }
+      });
+    }
 
     // Change name button
     const changeBtn = $('changeNameBtn');
@@ -106,12 +128,21 @@
       changeBtn.addEventListener('click', (e) => {
         e.preventDefault();
         const cur = localStorage.getItem('playerName') || '';
-        $('onboardName').value = cur;
-        $('onboardError').style.display='none';
+        const modalInput = $('onboardName');
+        if (modalInput) modalInput.value = cur;
+        const err = $('onboardError'); if (err) err.style.display='none';
         showOnboard();
       });
     }
+  }
 
-  });
+  // Run init when DOM is ready; also handle case where DOMContentLoaded already fired.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){
+      try { initOnboarding(); } catch (e) { console.error('[ONBOARDING] init error', e); }
+    });
+  } else {
+    try { initOnboarding(); } catch (e) { console.error('[ONBOARDING] init error', e); }
+  }
 
 })();
