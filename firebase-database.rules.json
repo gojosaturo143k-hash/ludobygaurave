@@ -7,25 +7,23 @@
         ".write": "auth != null",
         "players": {
           "$uid": {
-            ".write": "auth != null && auth.uid === $uid"
+            ".write": "auth != null && auth.uid === $uid",
+            ".validate": "newData.hasChildren(['uid','name','color','online','joinedAt']) ? newData.child('uid').val() === $uid : true"
           }
         },
         "actions": {
           ".read": "auth != null",
-          ".write": "auth != null"
+          ".write": "auth != null && newData.child('uid').val() === auth.uid"
         },
         "processedActions": {
-          // only host should mark actions processed
           ".read": "auth != null",
           ".write": "auth != null && auth.uid === root.child('rooms').child($room).child('hostId').val()"
         },
         "gameState": {
           ".read": "auth != null",
-          // only host can modify canonical gameState
           ".write": "auth != null && auth.uid === root.child('rooms').child($room).child('hostId').val()"
         },
         "hostId": {
-          // allow setting hostId only if it's currently null (room creation) or by current host
           ".write": "auth != null && (data.exists() ? auth.uid === data.val() : true) || auth.uid === root.child('rooms').child($room).child('hostId').val()"
         }
       }

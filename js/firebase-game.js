@@ -1,6 +1,6 @@
 // js/firebase-game.js
-// Low-level Firebase game networking primitives (no game rules)
-// Updated for Phase 4: processedActions helpers and safer primitives
+// Low-level Firebase game networking primitives (Phase 5 hardened)
+// Adds initGameStateIfMissing, stricter sendAction, and helpers
 
 (function(){
   if (!window.firebase) {
@@ -17,6 +17,7 @@
       checkActionProcessed: async () => false,
       getGameStateOnce: async () => null,
       getPlayersOnce: async () => ({}),
+      initGameStateIfMissing: async () => ({ success: false }),
       cleanup: () => {}
     };
     return;
@@ -44,15 +45,18 @@
   }
 
   // sendAction: push action to /rooms/{roomCode}/actions
+  // Ensures action.uid equals auth.uid to prevent clients spoofing others
   async function sendAction(roomCode, action) {
     try {
       const rc = String(roomCode || '').toUpperCase();
       const uid = getCurrentUid();
       if (!rc) return { success: false, error: 'INVALID_ROOM' };
       if (!uid) return { success: false, error: 'AUTH_REQUIRED' };
-      const payload = Object.assign({}, action, { uid, timestamp: firebase.database.ServerValue.TIMESTAMP });
+      const safeAction = Object.assign({}, action, { uid });
+      // Clients should not set processed flags or lastActionId
+      const payload = Object.assign({}, safeAction, { timestamp: firebase.database.ServerValue.TIMESTAMP });
       const ref = await db.ref(`rooms/${rc}/actions`).push(payload);
-      console.log('[FIREBASE-GAME] sendAction', rc, ref.key, payload.type);
+      console.log('[FIREBASE-GAME] sendAction', rc, ref.key, payload.type, 'uid=', uid);
       return { success: true, actionId: ref.key };
     } catch (err) {
       console.error('[FIREBASE-GAME] sendAction error', err);
@@ -67,19 +71,17 @@
       const rc = String(roomCode || '').toUpperCase();
       const ref = db.ref(`rooms/${rc}/processedActions/${actionId}`);
       const uid = getCurrentUid() || 'unknown';
-      // Use transaction to ensure only first writer succeeds
       const result = await ref.transaction(curr => {
         if (curr === null) {
           return { processedBy: uid, processedAt: firebase.database.ServerValue.TIMESTAMP };
         }
-        return; // abort, already exists
+        return; // already exists
       }, undefined, false);
 
       if (result.committed) {
         console.log('[FIREBASE-GAME] markActionProcessed committed', actionId);
         return { success: true };
       } else {
-        // already processed
         return { success: false, error: 'ALREADY_PROCESSED' };
       }
     } catch (err) {
@@ -137,6 +139,31 @@
     }
   }
 
+  // initGameStateIfMissing: create a minimal canonical gameState only if none exists
+  async function initGameStateIfMissing(roomCode, initialState) {
+    try {
+      const rc = String(roomCode || '').toUpperCase();
+      const ref = db.ref(`rooms/${rc}/gameState`);
+      const result = await ref.transaction(curr => {
+        if (curr === null) {
+          const payload = Object.assign({}, initialState || {}, { updatedAt: firebase.database.ServerValue.TIMESTAMP });
+          return payload;
+        }
+        return; // exists, abort
+      }, undefined, false);
+      if (result.committed) {
+        console.log('[FIREBASE-GAME] initGameStateIfMissing: created state');
+        return { success: true };
+      } else {
+        console.log('[FIREBASE-GAME] initGameStateIfMissing: gameState already exists');
+        return { success: false, error: 'ALREADY_EXISTS' };
+      }
+    } catch (err) {
+      console.error('[FIREBASE-GAME] initGameStateIfMissing error', err);
+      return { success: false, error: err.message };
+    }
+  }
+
   // getPlayersOnce
   async function getPlayersOnce(roomCode) {
     try {
@@ -178,7 +205,6 @@
   }
 
   function cleanup() {
-    // placeholder for future cleanup of listeners
     console.log('[FIREBASE-GAME] cleanup');
   }
 
@@ -194,6 +220,7 @@
     checkActionProcessed,
     getGameStateOnce,
     getPlayersOnce,
+    initGameStateIfMissing,
     cleanup
   };
 

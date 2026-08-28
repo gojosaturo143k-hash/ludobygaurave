@@ -1,38 +1,26 @@
 // js/firebase-renderer.js
 // Reconciles DOM token positions to canonical gameState.pieces
-// Improved for Phase 4: idempotent rendering and reconstructFromState
+// Phase 5: stronger idempotent rendering, removal of duplicates, correct reconstruction
 
 (function(){
   function findParentForPosition(color, index) {
     if (index === 0) return document.querySelector(`.${color}Path0`);
     if (index === 57) {
-      // home slot - use the tokenHome with color id
-      const home = document.querySelector(`.${color}Path57`) || document.querySelector(`#${color}Home`) || document.querySelector('.tokenHome');
-      return home;
+      return document.querySelector(`.${color}Path57`) || document.querySelector('.tokenHome');
     }
     return document.querySelector(`.${color}Path${index}`);
-  }
-
-  function currentParentOfToken(tokenEl) {
-    return tokenEl && tokenEl.parentElement ? tokenEl.parentElement : null;
-  }
-
-  function tokenAtParentMatches(tokenEl, color, index) {
-    const parent = currentParentOfToken(tokenEl);
-    if (!parent) return false;
-    if (index === 57) return parent.classList.contains('tokenHome') || parent.classList.contains(`${color}Home`);
-    // check for class like redPathNN
-    const classes = Array.from(parent.classList || []);
-    return classes.some(c => c === `${color}Path${index}`);
   }
 
   function placeTokenAt(color, tokenId, index) {
     try {
       const token = document.getElementById(tokenId);
       if (!token) return false;
-      if (tokenAtParentMatches(token, color, index)) return true; // already correct
       const dest = findParentForPosition(color, index);
       if (!dest) return false;
+      // If token is already in correct parent, nothing to do
+      if (token.parentElement === dest) return true;
+      // Remove duplicates: ensure token is removed from any other parent
+      if (token.parentElement) token.parentElement.removeChild(token);
       dest.appendChild(token);
       return true;
     } catch (err) {
@@ -41,8 +29,6 @@
     }
   }
 
-  // Render pieces object into DOM idempotently
-  // pieces: { red: [pos,pos,pos,pos], green: [...], ... }
   function renderPieces(pieces) {
     if (!pieces) return;
     const colors = ['red','green','yellow','blue'];
@@ -50,18 +36,29 @@
       const arr = pieces[color] || [];
       for (let i=0;i<4;i++){
         const pos = (typeof arr[i] !== 'undefined' && arr[i] !== null) ? arr[i] : 0;
-        const tokenId = `${color}Token${i+1}`; // id convention in DOM
+        const tokenId = `${color}Token${i+1}`;
         placeTokenAt(color, tokenId, pos);
       }
     });
   }
 
-  // Reconstruct entire board from canonical state
   function reconstructFromState(state) {
     if (!state || !state.pieces) return;
     try {
-      // Avoid duplicates: for every token id, ensure it's moved to the canonical parent
+      // Sanity: ensure tokens exist in DOM; if missing, log
+      const colors = ['red','green','yellow','blue'];
+      colors.forEach(color => {
+        for (let i=1;i<=4;i++){
+          const id = `${color}Token${i}`;
+          if (!document.getElementById(id)) {
+            console.warn('[FIREBASE-RENDER] token missing in DOM:', id);
+          }
+        }
+      });
+
+      // Place tokens idempotently
       renderPieces(state.pieces);
+
     } catch (err) {
       console.error('[FIREBASE-RENDER] reconstructFromState error', err);
     }
@@ -72,5 +69,4 @@
     placeTokenAt,
     reconstructFromState
   };
-
 })();
