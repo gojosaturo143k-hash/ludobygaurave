@@ -7,6 +7,71 @@ const play = document.querySelector("#play");
 const menu = document.querySelector(".menuContainer");
 const statusEl = document.getElementById("status");
 
+// Phase1 additions: localStorage persistence and firebase auth status hook
+(function phase1_init() {
+  // selectors in index.html
+  const playerNameInput = document.getElementById('playerName');
+  const roomCodeInput = document.getElementById('roomCode');
+
+  // Ensure fallback hidden inputs #name and #room exist so existing code reading them won't throw
+  function ensureHiddenFallbacks(){
+    if(!document.getElementById('name')){
+      const hid = document.createElement('input'); hid.type='hidden'; hid.id='name'; document.body.appendChild(hid);
+    }
+    if(!document.getElementById('room')){
+      const hid2 = document.createElement('input'); hid2.type='hidden'; hid2.id='room'; document.body.appendChild(hid2);
+    }
+  }
+  ensureHiddenFallbacks();
+
+  // Prefill playerName from localStorage
+  if (playerNameInput) {
+    const saved = localStorage.getItem('playerName');
+    if (saved) {
+      playerNameInput.value = saved;
+      const nameFallback = document.getElementById('name'); if(nameFallback) nameFallback.value = saved;
+    }
+  }
+
+  // Prefill roomCode from localStorage
+  if (roomCodeInput) {
+    const savedRoom = localStorage.getItem('roomCode');
+    if (savedRoom) {
+      roomCodeInput.value = savedRoom;
+      const roomFallback = document.getElementById('room'); if(roomFallback) roomFallback.value = savedRoom;
+    }
+  }
+
+  // Save playerName and roomCode to localStorage when Play is clicked (capture to run before existing handlers)
+  const playBtn = document.getElementById('play') || document.querySelector('#play');
+  if (playBtn) {
+    playBtn.addEventListener('click', () => {
+      const nameVal = (playerNameInput && playerNameInput.value) ? playerNameInput.value.trim() : '';
+      const roomVal = (roomCodeInput && roomCodeInput.value) ? roomCodeInput.value.trim() : '';
+      if (nameVal) localStorage.setItem('playerName', nameVal);
+      if (roomVal) localStorage.setItem('roomCode', roomVal);
+      const nameFallback = document.getElementById('name'); if(nameFallback) nameFallback.value = nameVal;
+      const roomFallback = document.getElementById('room'); if(roomFallback) roomFallback.value = roomVal;
+    }, { capture: true });
+  }
+
+  // Hook to Firebase anonymous auth status if firebase-init loaded
+  if (window.FirebaseAuth && typeof window.FirebaseAuth.onAuthReady === 'function') {
+    window.FirebaseAuth.onAuthReady((user) => {
+      try {
+        const statusEl = document.getElementById('status');
+        if (statusEl && user) {
+          const shortUid = user.uid ? user.uid.slice(0,8) : 'anon';
+          statusEl.innerText = (statusEl.innerText ? statusEl.innerText + ' | ' : '') + `Firebase: signed in (${shortUid})`;
+        }
+      } catch (e) {
+        console.warn('firebase-auth status update failed', e);
+      }
+    });
+  }
+})();
+
+
 // Audio
 const click = new Audio('mixkit-classic-click-1117.wav');
 

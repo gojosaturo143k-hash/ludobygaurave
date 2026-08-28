@@ -59,7 +59,7 @@
 </div>
 
 <!-- 🔥 WEBSOCKET CONNECTION -->
-<script
+<script>
     const ws = new WebSocket("wss://ludobygaurave-pen5.onrender.com");
 
     ws.onopen = () => {
@@ -75,6 +75,16 @@
         document.getElementById("status").innerText = "Server connection failed ❌";
     };
 </script>
+
+<!-- Firebase compat SDKs (fixed version 9.22.1) -->
+<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
+
+<!-- Firebase config & init (Phase 1: Anonymous Auth only) -->
+<script src="js/firebase-config.js"></script>
+<script src="js/firebase-init.js"></script>
+
 
 <!-- EXISTING JS -->
 <script src="index.js"></script>
