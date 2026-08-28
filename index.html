@@ -14,6 +14,19 @@
 
 <body>
 
+<!-- Onboarding modal (Phase 6) -->
+<div id="onboardingModal" class="onboard-modal" style="display:none;">
+  <div class="onboard-content">
+    <h1>Welcome to Ludo</h1>
+    <p>Enter your player name to continue</p>
+    <input id="onboardName" type="text" class="form-control" maxlength="20" placeholder="Your name">
+    <div id="onboardError" class="text-danger small mt-2" style="display:none;"></div>
+    <div class="mt-3 d-flex justify-content-center">
+      <button id="onboardSave" class="btn btn-primary me-2">Save & Continue</button>
+    </div>
+  </div>
+</div>
+
 <div class="menuContainer">
     <div class="container my-auto">
         <div class="row">
@@ -30,6 +43,12 @@
                            id="playerName"
                            class="form-control my-2"
                            placeholder="Your name">
+
+                    <!-- small player info + change name (Phase 6) -->
+                    <div id="playerInfo" class="small text-light mt-1" style="display:none;">
+                      Playing as: <span id="playerInfoName"></span>
+                      <button id="changeNameBtn" class="btn btn-link btn-sm text-decoration-none">Change</button>
+                    </div>
 
                     <!-- 🔥 NEW: ROOM CODE -->
                     <input type="text"
@@ -89,6 +108,9 @@
 
 <!-- Firebase room module (Phase 2) -->
 <script src="js/firebase-room.js"></script>
+
+<!-- Onboarding script (Phase 6) -->
+<script src="js/onboarding.js"></script>
 
 <!-- EXISTING JS -->
 <script src="index.js"></script>
